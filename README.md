@@ -37,8 +37,6 @@
 
 ## Polar: Open Source payments infrastructure for the 21st century
 
-a change
-
 Focus on building your passion, while we focus on the infrastructure to get you paid.
 
 - Sell SaaS and digital products in minutes
