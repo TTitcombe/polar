@@ -2,7 +2,8 @@ import uuid
 
 from polar.customer.repository import CustomerRepository
 from polar.exceptions import PolarTaskError
-from polar.worker import AsyncSessionMaker, actor
+from polar.locker import Locker
+from polar.worker import AsyncSessionMaker, RedisMiddleware, TaskPriority, actor
 
 from .service import customer_meter as customer_meter_service
 
@@ -17,7 +18,7 @@ class CustomerDoesNotExist(CustomerMeterTaskError):
         super().__init__(message)
 
 
-@actor(actor_name="customer_meter.update_customer")
+@actor(actor_name="customer_meter.update_customer", priority=TaskPriority.LOW)
 async def update_customer(customer_id: uuid.UUID) -> None:
     async with AsyncSessionMaker() as session:
         repository = CustomerRepository.from_session(session)
@@ -25,4 +26,7 @@ async def update_customer(customer_id: uuid.UUID) -> None:
         if customer is None:
             raise CustomerDoesNotExist(customer_id)
 
-        await customer_meter_service.update_customer(session, customer)
+        redis = RedisMiddleware.get()
+        locker = Locker(redis)
+
+        await customer_meter_service.update_customer(session, locker, customer)

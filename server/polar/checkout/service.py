@@ -2,18 +2,14 @@ import contextlib
 import typing
 import uuid
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
 
 import stripe as stripe_lib
 import structlog
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import UnaryExpression, asc, desc, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import contains_eager, joinedload, selectinload
 
-from polar.auth.models import (
-    Anonymous,
-    AuthSubject,
-)
+from polar.auth.models import Anonymous, AuthSubject
 from polar.checkout.schemas import (
     CheckoutConfirm,
     CheckoutCreate,
@@ -62,12 +58,10 @@ from polar.models import (
 from polar.models.checkout import CheckoutStatus
 from polar.models.checkout_product import CheckoutProduct
 from polar.models.discount import DiscountDuration
-from polar.models.product_price import (
-    ProductPriceAmountType,
-)
+from polar.models.product_price import ProductPriceAmountType
 from polar.models.webhook_endpoint import WebhookEventType
 from polar.order.service import order as order_service
-from polar.organization.service import organization as organization_service
+from polar.organization.repository import OrganizationRepository
 from polar.postgres import AsyncSession
 from polar.product.guard import (
     is_currency_price,
@@ -76,7 +70,7 @@ from polar.product.guard import (
     is_fixed_price,
 )
 from polar.product.repository import ProductPriceRepository, ProductRepository
-from polar.product.service.product import product as product_service
+from polar.product.service import product as product_service
 from polar.subscription.repository import SubscriptionRepository
 from polar.subscription.service import subscription as subscription_service
 from polar.webhook.service import webhook as webhook_service
@@ -189,6 +183,9 @@ class CheckoutService:
         *,
         organization_id: Sequence[uuid.UUID] | None = None,
         product_id: Sequence[uuid.UUID] | None = None,
+        customer_id: Sequence[uuid.UUID] | None = None,
+        status: Sequence[CheckoutStatus] | None = None,
+        query: str | None = None,
         pagination: PaginationParams,
         sorting: list[Sorting[CheckoutSortProperty]] = [
             (CheckoutSortProperty.created_at, True)
@@ -205,14 +202,16 @@ class CheckoutService:
         if product_id is not None:
             statement = statement.where(Checkout.product_id.in_(product_id))
 
-        order_by_clauses: list[UnaryExpression[Any]] = []
-        for criterion, is_desc in sorting:
-            clause_function = desc if is_desc else asc
-            if criterion == CheckoutSortProperty.created_at:
-                order_by_clauses.append(clause_function(Checkout.created_at))
-            elif criterion == CheckoutSortProperty.expires_at:
-                order_by_clauses.append(clause_function(Checkout.expires_at))
-        statement = statement.order_by(*order_by_clauses)
+        if customer_id is not None:
+            statement = statement.where(Checkout.customer_id.in_(customer_id))
+
+        if status is not None:
+            statement = statement.where(Checkout.status.in_(status))
+
+        if query is not None:
+            statement = statement.where(Checkout.customer_email.ilike(f"%{query}%"))
+
+        statement = repository.apply_sorting(statement, sorting)
 
         return await repository.paginate(
             statement, limit=pagination.limit, page=pagination.page
@@ -592,6 +591,7 @@ class CheckoutService:
         embed_origin: str | None = None,
         ip_geolocation_client: ip_geolocation.IPGeolocationClient | None = None,
         ip_address: str | None = None,
+        **query_metadata: str | None,
     ) -> Checkout:
         products: list[Product] = []
         for product in checkout_link.products:
@@ -652,6 +652,13 @@ class CheckoutService:
             success_url=checkout_link.success_url,
             user_metadata=checkout_link.user_metadata,
         )
+
+        for key, value in query_metadata.items():
+            if value is not None and key not in checkout.user_metadata:
+                checkout.user_metadata = {
+                    **(checkout.user_metadata or {}),
+                    key: value,
+                }
 
         if checkout.payment_processor == PaymentProcessor.stripe:
             checkout.payment_processor_metadata = {
@@ -764,7 +771,8 @@ class CheckoutService:
                 }
             )
 
-        for required_field in self._get_required_confirm_fields(checkout):
+        required_fields = self._get_required_confirm_fields(checkout)
+        for required_field in required_fields:
             if getattr(checkout, required_field) is None:
                 errors.append(
                     {
@@ -772,6 +780,20 @@ class CheckoutService:
                         "loc": ("body", required_field),
                         "msg": "Field is required.",
                         "input": None,
+                    }
+                )
+
+        if checkout.require_billing_address or checkout.is_business_customer:
+            if (
+                checkout.customer_billing_address is None
+                or not checkout.customer_billing_address.has_address()
+            ):
+                errors.append(
+                    {
+                        "type": "value_error",
+                        "loc": ("body", "customer_billing_address"),
+                        "msg": "Full billing address is required.",
+                        "input": checkout.customer_billing_address,
                     }
                 )
 
@@ -1089,7 +1111,7 @@ class CheckoutService:
         auth_subject: AuthSubject[User | Organization],
         product_id: uuid.UUID,
     ) -> tuple[Sequence[Product], Product, ProductPrice]:
-        product = await product_service.get_by_id(session, auth_subject, product_id)
+        product = await product_service.get(session, auth_subject, product_id)
 
         if product is None:
             raise PolarRequestValidationError(
@@ -1130,7 +1152,7 @@ class CheckoutService:
         errors: list[ValidationError] = []
 
         for index, product_id in enumerate(product_ids):
-            product = await product_service.get_by_id(session, auth_subject, product_id)
+            product = await product_service.get(session, auth_subject, product_id)
 
             if product is None:
                 errors.append(
@@ -1651,6 +1673,8 @@ class CheckoutService:
         fields = {"customer_email"}
         if checkout.is_payment_form_required:
             fields.update({"customer_name", "customer_billing_address"})
+        if checkout.is_business_customer:
+            fields.update({"customer_billing_name", "customer_billing_address"})
         return fields
 
     async def _create_or_update_customer(
@@ -1683,7 +1707,9 @@ class CheckoutService:
         stripe_customer_id = customer.stripe_customer_id
         if stripe_customer_id is None:
             create_params: stripe_lib.Customer.CreateParams = {"email": customer.email}
-            if checkout.customer_name is not None:
+            if checkout.customer_billing_name is not None:
+                create_params["name"] = checkout.customer_billing_name
+            elif checkout.customer_name is not None:
                 create_params["name"] = checkout.customer_name
             if checkout.customer_billing_address is not None:
                 create_params["address"] = checkout.customer_billing_address.to_dict()  # type: ignore
@@ -1695,7 +1721,9 @@ class CheckoutService:
             stripe_customer_id = stripe_customer.id
         else:
             update_params: stripe_lib.Customer.ModifyParams = {"email": customer.email}
-            if checkout.customer_name is not None:
+            if checkout.customer_billing_name is not None:
+                update_params["name"] = checkout.customer_billing_name
+            elif checkout.customer_name is not None:
                 update_params["name"] = checkout.customer_name
             if checkout.customer_billing_address is not None:
                 update_params["address"] = checkout.customer_billing_address.to_dict()  # type: ignore
@@ -1711,6 +1739,8 @@ class CheckoutService:
 
         if checkout.customer_name is not None:
             customer.name = checkout.customer_name
+        if checkout.customer_billing_name is not None:
+            customer.billing_name = checkout.customer_billing_name
         if checkout.customer_billing_address is not None:
             customer.billing_address = checkout.customer_billing_address
         if checkout.customer_tax_id is not None:
@@ -1759,8 +1789,9 @@ class CheckoutService:
     async def _after_checkout_created(
         self, session: AsyncSession, checkout: Checkout
     ) -> None:
-        organization = await organization_service.get(
-            session, checkout.product.organization_id
+        organization_repository = OrganizationRepository.from_session(session)
+        organization = await organization_repository.get_by_id(
+            checkout.product.organization_id
         )
         assert organization is not None
         await webhook_service.send(
@@ -1773,8 +1804,9 @@ class CheckoutService:
         await publish_checkout_event(
             checkout.client_secret, CheckoutEvent.updated, {"status": checkout.status}
         )
-        organization = await organization_service.get(
-            session, checkout.product.organization_id
+        organization_repository = OrganizationRepository.from_session(session)
+        organization = await organization_repository.get_by_id(
+            checkout.product.organization_id
         )
         if organization is not None:
             events = await webhook_service.send(

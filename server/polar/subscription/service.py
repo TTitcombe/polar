@@ -32,6 +32,7 @@ from polar.integrations.stripe.schemas import ProductType
 from polar.integrations.stripe.service import stripe as stripe_service
 from polar.integrations.stripe.utils import get_expandable_id
 from polar.kit.db.postgres import AsyncSession
+from polar.kit.metadata import MetadataQuery, apply_metadata_clause
 from polar.kit.pagination import PaginationParams, paginate
 from polar.kit.services import ResourceServiceReader
 from polar.kit.sorting import Sorting
@@ -61,7 +62,7 @@ from polar.notifications.notification import (
 )
 from polar.notifications.service import PartialNotification
 from polar.notifications.service import notifications as notifications_service
-from polar.organization.service import organization as organization_service
+from polar.organization.repository import OrganizationRepository
 from polar.postgres import sql
 from polar.product.guard import (
     is_custom_price,
@@ -72,7 +73,6 @@ from polar.product.repository import ProductRepository
 from polar.webhook.service import webhook as webhook_service
 from polar.worker import enqueue_job
 
-from ..product.service.product import product as product_service
 from .repository import SubscriptionRepository
 from .schemas import (
     SubscriptionCancel,
@@ -211,6 +211,7 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
         customer_id: Sequence[uuid.UUID] | None = None,
         discount_id: Sequence[uuid.UUID] | None = None,
         active: bool | None = None,
+        metadata: MetadataQuery | None = None,
         pagination: PaginationParams,
         sorting: list[Sorting[SubscriptionSortProperty]] = [
             (SubscriptionSortProperty.started_at, True)
@@ -241,6 +242,9 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
                 statement = statement.where(Subscription.active.is_(True))
             else:
                 statement = statement.where(Subscription.revoked.is_(True))
+
+        if metadata is not None:
+            statement = apply_metadata_clause(Subscription, statement, metadata)
 
         order_by_clauses: list[UnaryExpression[Any]] = []
         for criterion, is_desc in sorting:
@@ -333,6 +337,9 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
         checkout: Checkout,
         intent: stripe_lib.PaymentIntent | stripe_lib.SetupIntent | None,
     ) -> Subscription:
+        idempotency_key = (
+            f"subscription_{checkout.id}{'' if intent is None else f'_{intent.id}'}"
+        )
         product = checkout.product
         if not product.is_recurring:
             raise NotARecurringProduct(checkout, product)
@@ -373,7 +380,11 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
             # For pay-what-you-want prices, we need to generate a dedicated price in Stripe
             if is_custom_price(price):
                 ad_hoc_price = await stripe_service.create_ad_hoc_custom_price(
-                    product, price, amount=checkout.amount, currency=checkout.currency
+                    product,
+                    price,
+                    amount=checkout.amount,
+                    currency=checkout.currency,
+                    idempotency_key=f"{idempotency_key}_{price.id}",
                 )
                 stripe_price_ids.append(ad_hoc_price.id)
                 subscription_product_prices.append(
@@ -392,7 +403,9 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
         # It happens if we only have metered prices on the product
         if len(stripe_price_ids) == 0:
             placeholder_price = await stripe_service.create_placeholder_price(
-                product, checkout.currency
+                product,
+                checkout.currency,
+                idempotency_key=f"{idempotency_key}_placeholder",
             )
             stripe_price_ids.append(placeholder_price.id)
 
@@ -420,6 +433,7 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
                 automatic_tax=automatic_tax,
                 metadata=metadata,
                 invoice_metadata=invoice_metadata,
+                idempotency_key=f"{idempotency_key}_create",
             )
             subscription = Subscription()
             new_subscription = True
@@ -438,10 +452,12 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
                 automatic_tax=automatic_tax,
                 metadata=metadata,
                 invoice_metadata=invoice_metadata,
+                idempotency_key=f"{idempotency_key}_update",
             )
         await stripe_service.set_automatically_charged_subscription(
             stripe_subscription.id,
             stripe_payment_method_id,
+            idempotency_key=f"{idempotency_key}_payment_method",
         )
 
         subscription.stripe_subscription_id = stripe_subscription.id
@@ -658,8 +674,9 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
         subscription.recurring_interval = product.recurring_interval
 
         if proration_behavior is None:
-            organization = await organization_service.get(
-                session, product.organization_id
+            organization_repository = OrganizationRepository.from_session(session)
+            organization = await organization_repository.get_by_id(
+                product.organization_id
             )
             assert organization is not None
             proration_behavior = organization.proration_behavior
@@ -1067,18 +1084,20 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
         full_subscription = await self.get(session, subscription.id)
         assert full_subscription
 
-        if tier := await product_service.get_loaded(session, subscription.product_id):
-            if subscribed_to_org := await organization_service.get(
-                session, tier.organization_id
-            ):
-                await webhook_service.send(
-                    session, subscribed_to_org, event_type, full_subscription
-                )
+        product_repository = ProductRepository.from_session(session)
+        product = await product_repository.get_by_id(
+            subscription.product_id, options=product_repository.get_eager_options()
+        )
+        if product is not None:
+            await webhook_service.send(
+                session, product.organization, event_type, full_subscription
+            )
 
     async def enqueue_benefits_grants(
         self, session: AsyncSession, subscription: Subscription
     ) -> None:
-        product = await product_service.get(session, subscription.product_id)
+        product_repository = ProductRepository.from_session(session)
+        product = await product_repository.get_by_id(subscription.product_id)
         assert product is not None
 
         if subscription.is_incomplete():
@@ -1156,14 +1175,14 @@ class SubscriptionService(ResourceServiceReader[Subscription]):
         email_sender = get_email_sender()
 
         product = subscription.product
-        featured_organization = await organization_service.get(
-            session,
+        organization_repository = OrganizationRepository.from_session(session)
+        featured_organization = await organization_repository.get_by_id(
             product.organization_id,
             # We block organizations in case of fraud and then refund/cancel
             # so make sure we can still fetch them for the purpose of sending
             # customer emails.
-            allow_blocked=True,
-            allow_deleted=True,
+            include_deleted=True,
+            include_blocked=True,
         )
         assert featured_organization is not None
 

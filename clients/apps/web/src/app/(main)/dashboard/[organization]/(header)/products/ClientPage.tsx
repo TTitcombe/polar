@@ -222,35 +222,6 @@ const ProductListItem = ({ product, organization }: ProductListItemProps) => {
     }
   }
 
-  const generateCopyPriceLabel = (
-    price: schemas['ProductPrice'],
-    amountOfPrices: number,
-    prefix: string,
-  ) => {
-    let suffix = ''
-    // We only add the suffix in case we have more than 1 price point, i.e
-    // monthly + annual subscription
-    if (amountOfPrices > 1 && price.type === 'recurring') {
-      switch (price.recurring_interval) {
-        case 'month':
-          suffix = 'Monthly'
-          break
-        case 'year':
-          suffix = 'Yearly'
-          break
-      }
-      suffix = ` (${suffix})`
-    }
-
-    return `${prefix}${suffix}`
-  }
-
-  const onCopyPriceID = (price: schemas['ProductPrice']) => {
-    if (typeof navigator !== 'undefined') {
-      navigator.clipboard.writeText(price.id)
-    }
-  }
-
   const updateProduct = useUpdateProduct(organization)
 
   const onArchiveProduct = useCallback(async () => {
@@ -356,25 +327,6 @@ const ProductListItem = ({ product, organization }: ProductListItemProps) => {
                 align="end"
                 className="dark:bg-polar-800 bg-gray-50 shadow-lg"
               >
-                {product.prices.length > 0 && (
-                  <>
-                    {product.prices.map((price) => (
-                      <DropdownMenuItem
-                        key={price.id}
-                        onClick={handleContextMenuCallback(() => {
-                          onCopyPriceID(price)
-                        })}
-                      >
-                        {generateCopyPriceLabel(
-                          price,
-                          product.prices.length,
-                          'Copy Price ID',
-                        )}
-                      </DropdownMenuItem>
-                    ))}
-                  </>
-                )}
-                <DropdownMenuSeparator className="dark:bg-polar-600 bg-gray-200" />
                 <DropdownMenuItem
                   onClick={handleContextMenuCallback(() => {
                     if (typeof navigator !== 'undefined') {
@@ -383,6 +335,16 @@ const ProductListItem = ({ product, organization }: ProductListItemProps) => {
                   })}
                 >
                   Copy Product ID
+                </DropdownMenuItem>
+                <DropdownMenuSeparator className="dark:bg-polar-600 bg-gray-200" />
+                <DropdownMenuItem
+                  onClick={handleContextMenuCallback(() => {
+                    router.push(
+                      `/dashboard/${organization.slug}/onboarding/integrate?productId=${product.id}`,
+                    )
+                  })}
+                >
+                  Integrate Checkout
                 </DropdownMenuItem>
                 <DropdownMenuSeparator className="dark:bg-polar-600 bg-gray-200" />
                 <DropdownMenuItem

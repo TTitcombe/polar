@@ -128,7 +128,7 @@ class CustomerStateBenefitGrant(TimestampedSchema, IDSchema):
     properties: BenefitGrantProperties
 
 
-class CustomerStateMeter(TimestampedSchema):
+class CustomerStateMeter(TimestampedSchema, IDSchema):
     """An active meter for a customer, with latest consumed and credited units."""
 
     meter_id: UUID4 = Field(
@@ -143,8 +143,7 @@ class CustomerStateMeter(TimestampedSchema):
     balance: float = Field(
         description=(
             "The balance of the meter, "
-            "i.e. the difference between credited and consumed units. "
-            "Never goes negative."
+            "i.e. the difference between credited and consumed units."
         ),
         examples=[75.0],
     )

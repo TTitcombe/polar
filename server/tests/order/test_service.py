@@ -16,6 +16,7 @@ from polar.integrations.stripe.service import StripeService
 from polar.kit.address import Address
 from polar.kit.db.postgres import AsyncSession
 from polar.kit.pagination import PaginationParams
+from polar.kit.tax import TaxabilityReason
 from polar.models import (
     Account,
     Customer,
@@ -94,6 +95,19 @@ def stripe_service_mock(mocker: MockerFixture, customer: Customer) -> MagicMock:
         email=customer.email,
         name=customer.name,
         address=customer.billing_address,
+    )
+
+    mock.get_tax_rate.return_value = stripe_lib.TaxRate.construct_from(
+        {
+            "id": "STRIPE_TAX_RATE_ID",
+            "rate_type": "percentage",
+            "percentage": 20.0,
+            "flat_amount": None,
+            "display_name": "VAT",
+            "country": "FR",
+            "state": None,
+        },
+        key=None,
     )
 
     return mock
@@ -301,6 +315,54 @@ class TestList:
         assert len(orders) == 1
         assert orders[0].id == order2.id
 
+    @pytest.mark.auth(
+        AuthSubjectFixture(subject="user"), AuthSubjectFixture(subject="organization")
+    )
+    async def test_metadata_filter(
+        self,
+        save_fixture: SaveFixture,
+        session: AsyncSession,
+        auth_subject: AuthSubject[User | Organization],
+        organization: Organization,
+        user_organization: UserOrganization,
+        product: Product,
+        customer: Customer,
+    ) -> None:
+        order1 = await create_order(
+            save_fixture,
+            user_metadata={"reference_id": "ABC"},
+            product=product,
+            customer=customer,
+            stripe_invoice_id="INVOICE_1",
+        )
+        order2 = await create_order(
+            save_fixture,
+            user_metadata={"reference_id": "DEF"},
+            product=product,
+            customer=customer,
+            stripe_invoice_id="INVOICE_2",
+        )
+        await create_order(
+            save_fixture,
+            user_metadata={"reference_id": "GHI"},
+            product=product,
+            customer=customer,
+            stripe_invoice_id="INVOICE_3",
+        )
+
+        orders, total = await order_service.list(
+            session,
+            auth_subject,
+            metadata={"reference_id": ["ABC", "DEF"]},
+            pagination=PaginationParams(1, 10),
+        )
+
+        assert len(orders) == 2
+        assert total == 2
+
+        assert order1 in orders
+        assert order2 in orders
+
 
 @pytest.mark.asyncio
 class TestCreateFromCheckout:
@@ -406,6 +468,7 @@ class TestCreateFromCheckout:
             coupon=None,
             automatic_tax=True,
             metadata=ANY,
+            idempotency_key=ANY,
         )
 
         enqueue_job_mock.assert_any_call(
@@ -479,6 +542,7 @@ class TestCreateFromCheckout:
             coupon=None,
             automatic_tax=True,
             metadata=ANY,
+            idempotency_key=ANY,
         )
 
         enqueue_job_mock.assert_any_call(
@@ -551,6 +615,7 @@ class TestCreateFromCheckout:
             coupon=None,
             automatic_tax=False,
             metadata=ANY,
+            idempotency_key=ANY,
         )
 
         enqueue_job_mock.assert_any_call(
@@ -629,6 +694,7 @@ class TestCreateFromCheckout:
             coupon=discount_percentage_100.stripe_coupon_id,
             automatic_tax=False,
             metadata=ANY,
+            idempotency_key=ANY,
         )
 
         enqueue_job_mock.assert_any_call(
@@ -878,6 +944,39 @@ class TestCreateOrderFromStripe:
         publish_checkout_event_mock.assert_awaited_once_with(
             checkout.client_secret, CheckoutEvent.order_created
         )
+
+    async def test_tax(
+        self,
+        stripe_service_mock: MagicMock,
+        enqueue_job_mock: AsyncMock,
+        session: AsyncSession,
+        subscription: Subscription,
+        product: Product,
+        event_creation_time: tuple[datetime, int],
+    ) -> None:
+        created_datetime, created_unix_timestamp = event_creation_time
+
+        invoice = construct_stripe_invoice(
+            amount_paid=100,
+            subscription_id=subscription.stripe_subscription_id,
+            lines=[
+                {
+                    "price_id": price.stripe_price_id,
+                    "amount": cast(ProductPriceFixed, price).price_amount,
+                    "tax_amount": 1,
+                }
+                for price in product.prices
+                if is_static_price(price)
+            ],
+            created=created_unix_timestamp,
+            customer_id=cast(str, subscription.customer.stripe_customer_id),
+        )
+
+        order = await order_service.create_order_from_stripe(session, invoice)
+
+        assert order.tax_amount == 1
+        assert order.tax_rate is not None
+        assert order.taxability_reason == TaxabilityReason.standard_rated
 
 
 @pytest.mark.asyncio

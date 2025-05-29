@@ -36,6 +36,22 @@ class EventRepository(RepositoryBase[Event], RepositoryIDMixin[Event, UUID]):
         result = await self.session.execute(statement, events)
         return result.scalars().all()
 
+    async def get_latest_meter_reset(
+        self, customer: Customer, meter_id: UUID
+    ) -> Event | None:
+        statement = (
+            self.get_base_statement()
+            .where(
+                Event.customer == customer,
+                Event.source == EventSource.system,
+                Event.name == SystemEvent.meter_reset,
+                Event.user_metadata["meter_id"].astext == str(meter_id),
+            )
+            .order_by(Event.timestamp.desc())
+            .limit(1)
+        )
+        return await self.get_one_or_none(statement)
+
     def get_event_names_statement(
         self, auth_subject: AuthSubject[User | Organization]
     ) -> Select[tuple[str, EventSource, int, datetime, datetime]]:
@@ -103,10 +119,10 @@ class EventRepository(RepositoryBase[Event], RepositoryIDMixin[Event, UUID]):
             meter.aggregation.get_sql_clause(Event),
         )
 
-    def get_meter_credit_clause(self, meter: Meter) -> ColumnExpressionArgument[bool]:
+    def get_meter_system_clause(self, meter: Meter) -> ColumnExpressionArgument[bool]:
         return and_(
             Event.source == EventSource.system,
-            Event.name.in_((SystemEvent.meter_credited,)),
+            Event.name.in_((SystemEvent.meter_credited, SystemEvent.meter_reset)),
             Event.user_metadata["meter_id"].astext == str(meter.id),
         )
 

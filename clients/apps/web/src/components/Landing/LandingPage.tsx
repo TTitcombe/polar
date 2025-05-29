@@ -5,10 +5,10 @@ import { MerchantOfRecord } from '@/components/Landing/MOR'
 import { Testimonials } from '@/components/Landing/Testimonials'
 import Avatar from '@polar-sh/ui/components/atoms/Avatar'
 import Link from 'next/link'
+import { Adapters } from './Adapters'
 import { Benefits } from './Benefits'
 import { Checkout } from './Checkout'
 import Features from './Features'
-import { Intro } from './Intro'
 import { Pricing } from './Pricing'
 import SDKs from './SDKs'
 import { Section } from './Section'
@@ -27,10 +27,12 @@ export default function Page() {
 export const PageContent = () => {
   return (
     <>
-      <Hero className="relative z-10" />
-      <Section className="flex flex-col gap-y-24">
+      <Section className="flex flex-col gap-y-24 md:pt-0">
+        <Hero className="relative z-10" />
         <Features />
-
+        <Adapters />
+        <SDKs />
+        <Usage />
         <Link
           href="https://x.com/rauchg/status/1909810055622672851"
           className="flex flex-col items-center gap-y-12 text-center transition-opacity hover:opacity-80"
@@ -57,10 +59,6 @@ export const PageContent = () => {
             </div>
           </div>
         </Link>
-
-        <Intro />
-        <SDKs />
-        <Usage />
       </Section>
       <Testimonials />
       <Section className="flex flex-col gap-y-24">

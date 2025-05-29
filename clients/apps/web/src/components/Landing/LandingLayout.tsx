@@ -4,7 +4,6 @@ import { TopbarNavigation } from '@/components/Landing/TopbarNavigation'
 import { BrandingMenu } from '@/components/Layout/Public/BrandingMenu'
 import Footer from '@/components/Organization/Footer'
 import { usePostHog } from '@/hooks/posthog'
-import { ArrowOutward, KeyboardArrowRightOutlined } from '@mui/icons-material'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import { motion } from 'framer-motion'
 import Link from 'next/link'
@@ -17,15 +16,13 @@ import { useModal } from '../Modal/useModal'
 
 export default function Layout({ children }: PropsWithChildren) {
   return (
-    <div className="dark:bg-polar-950 relative flex flex-row bg-gray-50">
-      <LandingPageDesktopNavigation />
-      <div className="flex flex-col gap-32 md:w-full md:flex-1 md:items-center md:pt-16">
-        <div className="flex flex-col gap-y-2 md:w-full md:max-w-3xl xl:max-w-7xl">
-          <LandingPageTopbar />
-          <div className="dark:bg-polar-950 relative flex w-screen flex-col px-4 md:w-full md:px-0">
-            {children}
-            <LandingPageFooter />
-          </div>
+    <div className="dark:bg-polar-950 relative flex flex-col gap-32 bg-gray-50 md:w-full md:flex-1 md:items-center">
+      <div className="flex flex-col gap-y-2 md:w-full">
+        <LandingPageTopbar />
+        <LandingPageDesktopNavigation />
+        <div className="dark:bg-polar-950 relative flex flex-col px-4 md:w-full md:px-0">
+          {children}
+          <LandingPageFooter />
         </div>
       </div>
     </div>
@@ -56,59 +53,55 @@ const NavLink = ({
       )}
     >
       {children}
-      {isExternal && (
-        <span>
-          <ArrowOutward fontSize="inherit" />
-        </span>
-      )}
     </Link>
   )
 }
 
 const LandingPageDesktopNavigation = () => {
+  const posthog = usePostHog()
+  const { isShown: isModalShown, hide: hideModal, show: showModal } = useModal()
+
+  const onLoginClick = () => {
+    posthog.capture('global:user:login:click')
+    showModal()
+  }
+
   return (
-    <div className="dark:text-polar-50 sticky top-0 hidden h-full w-fit flex-shrink-0 flex-col justify-between gap-y-12 p-12 md:flex">
-      <div className="flex flex-col gap-y-12 text-base font-medium leading-tight tracking-[-0.01em]">
+    <div className="dark:text-polar-50 hidden w-full flex-col items-center gap-12 py-12 md:flex">
+      <div className="relative flex w-full flex-row items-center justify-between md:max-w-3xl xl:max-w-7xl">
         <BrandingMenu logoVariant="logotype" size={100} />
 
-        <div className="flex flex-col gap-y-12">
-          <ul className="flex flex-col gap-y-3">
-            <li>
-              <NavLink href="/" isActive={(pathname) => pathname === '/'}>
-                Features
-              </NavLink>
-            </li>
-            <li>
-              <NavLink href="https://docs.polar.sh">Docs</NavLink>
-            </li>
-            <li>
-              <NavLink href="https://github.com/polarsource">
-                Open Source
-              </NavLink>
-            </li>
-            <li>
-              <NavLink href="/company">Company</NavLink>
-            </li>
-            <li>
-              <NavLink href="/blog">Blog</NavLink>
-            </li>
-          </ul>
-          <ul className="flex flex-col gap-y-3">
-            <li>
-              <NavLink href="/login">
-                <span>Login</span>
-                <KeyboardArrowRightOutlined fontSize="inherit" />
-              </NavLink>
-            </li>
-            <li>
-              <NavLink href="/login">
-                <span>Get Started</span>
-                <KeyboardArrowRightOutlined fontSize="inherit" />
-              </NavLink>
-            </li>
-          </ul>
-        </div>
+        <ul className="absolute left-1/2 mx-auto flex -translate-x-1/2 flex-row gap-x-6 font-medium">
+          <li>
+            <NavLink href="/" isActive={(pathname) => pathname === '/'}>
+              Features
+            </NavLink>
+          </li>
+          <li>
+            <NavLink href="https://docs.polar.sh">Docs</NavLink>
+          </li>
+          <li>
+            <NavLink href="/company">Company</NavLink>
+          </li>
+          <li>
+            <NavLink href="/blog">Blog</NavLink>
+          </li>
+        </ul>
+
+        <Button
+          onClick={onLoginClick}
+          className="rounded-full"
+          variant="secondary"
+        >
+          Log In
+        </Button>
       </div>
+      <Modal
+        isShown={isModalShown}
+        hide={hideModal}
+        modalContent={<AuthModal />}
+        className="lg:w-full lg:max-w-[480px]"
+      />
     </div>
   )
 }
@@ -123,7 +116,7 @@ const LandingPageTopbar = () => {
   }
 
   return (
-    <div className="z-30 flex w-full flex-row items-center justify-between px-6 py-6 md:hidden md:max-w-7xl md:px-12">
+    <div className="z-30 flex w-full flex-row items-center justify-between px-6 py-6 md:hidden md:px-12">
       <TopbarNavigation />
       <BrandingMenu
         className="ml-2 mt-1 md:hidden"
@@ -133,7 +126,7 @@ const LandingPageTopbar = () => {
       <div className="flex flex-row items-center gap-x-4">
         <Button
           onClick={onLoginClick}
-          className="text-black dark:text-white"
+          className="rounded-full"
           variant="secondary"
         >
           Log in
@@ -153,13 +146,15 @@ const LandingPageFooter = () => {
   return (
     <motion.div
       initial="initial"
-      className="flex"
+      className="flex w-full flex-col items-center"
       variants={{ initial: { opacity: 0 }, animate: { opacity: 1 } }}
       transition={{ duration: 0.5, ease: 'easeInOut' }}
       whileInView="animate"
       viewport={{ once: true }}
     >
-      <Footer wide />
+      <div className="flex w-full flex-col gap-y-12 md:max-w-3xl xl:max-w-7xl">
+        <Footer />
+      </div>
     </motion.div>
   )
 }
